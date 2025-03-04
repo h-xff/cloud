@@ -20,6 +20,7 @@ systemctl disable firewalld  >> /dev/null 2>&1
 curl -o /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-7.repo
 yum makecache
 yum -y upgrade
+yum install expect -y
 
 #iptables
 yum install  iptables-services  -y 
@@ -46,6 +47,38 @@ fi
 sed -i -e "/controller/d" -e "/compute/d" /etc/hosts
 echo "192.168.100.20 controller" >> /etc/hosts
 echo "192.168.100.30 compute" >> /etc/hosts
+#ssh
+if [[ ! -s ~/.ssh/id_rsa.pub ]];then
+    ssh-keygen  -t rsa -N '' -f ~/.ssh/id_rsa -q -b 2048
+fi
+name=`hostname`
+if [[ $name ==controller ]];then
+expect -c "set timeout -1;
+               spawn ssh-copy-id  -i /root/.ssh/id_rsacompute;
+               expect {
+                   *password:* {send -- $HOST_PASS_NODE\r;
+                        expect {
+                            *denied* {exit 2;}
+                            eof}
+                    }
+                   *(yes/no)* {send -- yes\r;exp_continue;}
+                   eof         {exit 1;}
+               }
+               "
+else
+expect -c "set timeout -1;
+               spawn ssh-copy-id  -i /root/.ssh/id_rsacontroller;
+               expect {
+                   *password:* {send -- $HOST_PASS\r;
+                        expect {
+                            *denied* {exit 2;}
+                            eof}
+                    }
+                   *(yes/no)* {send -- yes\r;exp_continue;}
+                   eof         {exit 1;}
+               }
+               "
+fi
 
 #chrony
 name=`hostname`
