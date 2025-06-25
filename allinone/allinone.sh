@@ -620,13 +620,7 @@ systemctl enable openstack-nova-api.service openstack-nova-scheduler.service \
   openstack-nova-conductor.service openstack-nova-novncproxy.service libvirtd.service openstack-nova-compute.service
 systemctl restart openstack-nova-api.service openstack-nova-scheduler.service \
   openstack-nova-conductor.service openstack-nova-novncproxy.service libvirtd.service openstack-nova-compute.service
-
-# 创建实例类型
-openstack flavor create --id 1 --vcpus 1 --ram 512 --disk 10 m1.tiny
-openstack flavor create --id 2 --vcpus 1 --ram 1024 --disk 20 m1.small
-openstack flavor create --id 3 --vcpus 2 --ram 2048 --disk 40 m1.medium
-openstack flavor create --id 4 --vcpus 1 --ram 512 --disk 1 TestFlavor
-
+  
 echo -e "\033[1;32mNova安装完成! 计算节点状态:\033[0m"
 openstack compute service list
 
