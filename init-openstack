@@ -45,7 +45,7 @@ ROUTER_NAME="provider-router"    # 路由器名称
 # 安全组和密钥配置
 SEC_GROUP="default"      # 安全组名称
 KEY_NAME="demo-key"      # 密钥对名称
-FLAVOR_NAME="m1.small"   # 默认实例规格
+FLAVOR_NAME="m1.tiny"   # 默认实例规格
 
 # 环境语言设置：避免本地化错误
 unset LANG
