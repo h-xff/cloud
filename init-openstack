@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+
+# 严格错误处理：命令失败或管道中断时立即退出
+set -o errexit
+set -o pipefail
+
+# 调试模式设置
+DEBUG=${DEBUG:-0}
+if [[ $DEBUG -eq 1 ]]; then
+    set -o xtrace  # 打印所有执行命令
+fi
+
+# ================================================================================
+# OpenStack手动安装环境初始化脚本
+# 功能：
+#   1. 下载注册Cirros测试镜像
+#   2. 配置内部和外部网络
+#   3. 设置路由器连接内外网
+#   4. 配置安全组规则
+#   5. 创建SSH密钥对
+#   6. 调整资源配额
+#   7. 创建标准实例规格
+# ================================================================================
+
+# Cirros镜像配置
+CIRROS_RELEASE="0.5.2"  # Cirros版本
+IMAGE_NAME="cirros"      # 镜像名称
+IMAGE_TYPE="linux"       # 镜像类型
+IMAGE_URL="http://download.cirros-cloud.net/${CIRROS_RELEASE}/cirros-${CIRROS_RELEASE}-x86_64-disk.img"
+
+# 网络配置
+INT_NET_NAME="private"           # 内部网络名称
+INT_SUBNET_NAME="private-subnet" # 内部子网名称
+INT_CIDR="192.168.10.0/24"       # 内部网络CIDR
+INT_GATEWAY="192.168.10.1"       # 内部网关
+EXT_NET_NAME="public"            # 外部网络名称
+EXT_PHYSICAL_NETWORK="provider"  # 物理网络名称
+EXT_SUBNET_NAME="public-subnet"  # 外部子网名称
+EXT_CIDR="192.168.0.0/24"        # 外部网络CIDR
+EXT_POOL_START="192.168.0.100"   # 浮动IP起始
+EXT_POOL_END="192.168.0.200"     # 浮动IP结束
+EXT_GATEWAY="192.168.0.1"        # 外部网关
+ROUTER_NAME="provider-router"    # 路由器名称
+
+# 安全组和密钥配置
+SEC_GROUP="default"      # 安全组名称
+KEY_NAME="demo-key"      # 密钥对名称
+FLAVOR_NAME="m1.small"   # 默认实例规格
+
+# 环境语言设置：避免本地化错误
+unset LANG
+unset LANGUAGE
+LC_ALL=C
+export LC_ALL
+
+# 检查管理员环境变量
+check_admin_env() {
+    if [[ -z "$OS_USERNAME" || -z "$OS_PASSWORD" || -z "$OS_AUTH_URL" ]]; then
+        echo "错误：管理员环境变量未加载"
+        echo "请执行: source /etc/openstack/admin-openrc"
+        exit 1
+    fi
+}
+
+# 检查必备工具
+check_requirements() {
+    for tool in curl openstack; do
+        if ! command -v $tool &>/dev/null; then
+            echo "请安装 $tool 后再运行此脚本"
+            exit 1
+        fi
+    done
+}
+
+# 幂等性检查
+check_already_initialized() {
+    if openstack image show "$IMAGE_NAME" &>/dev/null; then
+        echo "检测到已初始化环境 (存在${IMAGE_NAME}镜像)"
+        echo "此工具应在每个部署中仅运行一次"
+        exit 0
+    fi
+}
+
+# 创建测试镜像
+create_cirros_image() {
+    echo "正在配置测试镜像..."
+    TEMP_IMG="/tmp/cirros-${CIRROS_RELEASE}-x86_64-disk.img"
+    
+    # 下载镜像
+    if [[ ! -f "$TEMP_IMG" ]]; then
+        echo "下载Cirros镜像..."
+        curl -L -o "$TEMP_IMG" "$IMAGE_URL"
+    fi
+
+    # 注册镜像
+    openstack image create "$IMAGE_NAME" \
+        --disk-format qcow2 \
+        --container-format bare \
+        --public \
+        --file "$TEMP_IMG" \
+        --property os_type="$IMAGE_TYPE"
+    
+    # 清理临时文件
+    rm -f "$TEMP_IMG"
+}
+
+# 配置网络
+configure_networking() {
+    echo "正在配置网络..."
+    
+    # 创建内部网络
+    if ! openstack network show "$INT_NET_NAME" &>/dev/null; then
+        echo "创建内部网络 $INT_NET_NAME..."
+        openstack network create "$INT_NET_NAME"
+    fi
+
+    # 创建内部子网
+    if ! openstack subnet show "$INT_SUBNET_NAME" &>/dev/null; then
+        echo "创建内部子网 $INT_SUBNET_NAME..."
+        openstack subnet create "$INT_SUBNET_NAME" \
+            --network "$INT_NET_NAME" \
+            --subnet-range "$INT_CIDR" \
+            --gateway "$INT_GATEWAY" \
+            --dns-nameserver "8.8.8.8"
+    fi
+
+    # 创建外部网络
+    if ! openstack network show "$EXT_NET_NAME" &>/dev/null; then
+        echo "创建外部网络 $EXT_NET_NAME..."
+        openstack network create "$EXT_NET_NAME" \
+            --external \
+            --provider-physical-network "$EXT_PHYSICAL_NETWORK" \
+            --provider-network-type flat
+    fi
+
+    # 创建外部子网
+    if ! openstack subnet show "$EXT_SUBNET_NAME" &>/dev/null; then
+        echo "创建外部子网 $EXT_SUBNET_NAME..."
+        openstack subnet create "$EXT_SUBNET_NAME" \
+            --no-dhcp \
+            --network "$EXT_NET_NAME" \
+            --subnet-range "$EXT_CIDR" \
+            --gateway "$EXT_GATEWAY" \
+            --allocation-pool start="$EXT_POOL_START",end="$EXT_POOL_END"
+    fi
+
+    # 创建路由器
+    if ! openstack router show "$ROUTER_NAME" &>/dev/null; then
+        echo "创建路由器 $ROUTER_NAME..."
+        openstack router create "$ROUTER_NAME"
+        
+        # 连接内部网络
+        openstack router add subnet "$ROUTER_NAME" "$INT_SUBNET_NAME"
+        
+        # 设置外部网关
+        openstack router set --external-gateway "$EXT_NET_NAME" "$ROUTER_NAME"
+    fi
+}
+
+# 配置安全组
+configure_security() {
+    echo "正在配置安全组规则..."
+    
+    # 获取默认安全组ID
+    SEC_GROUP_ID=$(openstack security group list -f value -c ID -c Name | grep "$SEC_GROUP" | head -1 | cut -d' ' -f1)
+    
+    if [[ -z "$SEC_GROUP_ID" ]]; then
+        echo "警告：未找到默认安全组，创建新安全组"
+        SEC_GROUP_ID=$(openstack security group create "default" -f value -c id)
+    fi
+
+    # 添加规则（忽略已存在错误）
+    add_sg_rule() {
+        local proto=$1
+        local port=$2
+        local rule_options=$3
+        
+        # 检查规则是否已存在
+        if ! openstack security group rule list "$SEC_GROUP_ID" --protocol $proto $rule_options -f csv | grep -q \"$proto\"; then
+            openstack security group rule create \
+                --ingress \
+                --protocol $proto \
+                ${port:+--dst-port $port} \
+                ${rule_options} \
+                "$SEC_GROUP_ID" || true
+        fi
+    }
+
+    # 添加规则
+    add_sg_rule icmp "" "--ethertype IPv4"
+    add_sg_rule tcp 22 "--ethertype IPv4"
+}
+
+# 配置SSH密钥
+configure_ssh_key() {
+    echo "正在配置SSH密钥..."
+    
+    if openstack keypair show "$KEY_NAME" &>/dev/null; then
+        echo "密钥 $KEY_NAME 已存在，跳过创建"
+        return
+    fi
+
+    # 生成密钥对
+    KEY_FILE="${HOME}/.ssh/${KEY_NAME}"
+    if [[ ! -f "$KEY_FILE" ]]; then
+        ssh-keygen -t rsa -N '' -f "$KEY_FILE" &>/dev/null
+    fi
+
+    # 上传公钥
+    openstack keypair create --public-key "${KEY_FILE}.pub" "$KEY_NAME"
+    echo "SSH私钥位置: ${KEY_FILE}"
+}
+
+# 设置资源配额
+configure_quotas() {
+    echo "正在配置资源配额..."
+    ADMIN_PROJECT_ID=$(openstack project show admin -f value -c id)
+    
+    if [[ -n "$ADMIN_PROJECT_ID" ]]; then
+        openstack quota set --instances 40 "$ADMIN_PROJECT_ID"
+        openstack quota set --cores 40 "$ADMIN_PROJECT_ID"
+        openstack quota set --ram 96000 "$ADMIN_PROJECT_ID"
+    else
+        echo "警告：未找到管理员项目，跳过配额设置"
+    fi
+}
+
+# 创建实例规格
+create_flavors() {
+    echo "正在创建实例规格..."
+    
+    declare -A FLAVORS=(
+        ["m1.tiny"]="--id 1 --ram 512 --disk 1 --vcpus 1"
+        ["m1.small"]="--id 2 --ram 2048 --disk 20 --vcpus 1"
+        ["m1.medium"]="--id 3 --ram 4096 --disk 40 --vcpus 2"
+        ["m1.large"]="--id 4 --ram 8192 --disk 80 --vcpus 4"
+        ["m1.xlarge"]="--id 5 --ram 16384 --disk 160 --vcpus 8"
+    )
+
+    for flavor in "${!FLAVORS[@]}"; do
+        if ! openstack flavor show "$flavor" &>/dev/null; then
+            openstack flavor create $flavor ${FLAVORS[$flavor]}
+        fi
+    done
+}
+
+# 显示完成信息
+show_completion_info() {
+    echo -e "\n\033[32m======================"
+    echo "OpenStack初始化完成!"
+    echo "======================\033[0m"
+    
+    cat <<EOF
+
+创建测试实例命令：
+  openstack server create \\
+      --image ${IMAGE_NAME} \\
+      --flavor ${FLAVOR_NAME} \\
+      --key-name ${KEY_NAME} \\
+      --network ${INT_NET_NAME} \\
+      test-vm
+
+分配浮动IP：
+  FLOATING_IP=\$(openstack floating ip create ${EXT_NET_NAME} -f value -c floating_ip_address)
+  openstack server add floating ip test-vm \$FLOATING_IP
+
+连接测试实例：
+  ssh -i ~/.ssh/${KEY_NAME} cirros@\$FLOATING_IP
+EOF
+}
+
+# ========================
+# 主执行流程
+# ========================
+check_admin_env
+check_requirements
+check_already_initialized
+create_cirros_image
+configure_networking
+configure_security
+configure_ssh_key
+configure_quotas
+create_flavors
+show_completion_info
