@@ -31,8 +31,8 @@ IMAGE_URL="http://download.cirros-cloud.net/${CIRROS_RELEASE}/cirros-${CIRROS_RE
 # 网络配置
 INT_NET_NAME="private"           # 内部网络名称
 INT_SUBNET_NAME="private-subnet" # 内部子网名称
-INT_CIDR="192.168.10.0/24"       # 内部网络CIDR
-INT_GATEWAY="192.168.10.1"       # 内部网关
+INT_CIDR="10.0.0.0/24"           # 内部网络CIDR
+INT_GATEWAY="10.0.0.1"           # 内部网关
 EXT_NET_NAME="public"            # 外部网络名称
 EXT_PHYSICAL_NETWORK="provider"  # 物理网络名称
 EXT_SUBNET_NAME="public-subnet"  # 外部子网名称
