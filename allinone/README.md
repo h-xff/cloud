@@ -10,7 +10,7 @@ chmod +x ./allinone.sh
 脚本运行后会提示登录密码和控制台地址
 ```sh
 ========== OpenStack 登录信息 ==========
-控制台地址: http://192.168.0.15/dashboard
+控制台地址: http://xx.xx.xx.xx/dashboard
 域      名: Default
 管理员账号: admin
 管理员密码: 1YZXlKpY82ZYk3Yf
